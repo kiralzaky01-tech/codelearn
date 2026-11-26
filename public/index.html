@@ -1,0 +1,213 @@
+
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CodeLearn | Belajar Coding</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-slate-950 text-slate-100">
+
+<header class="topbar">
+    <div class="brand">
+        <span class="logo">C</span>
+        <span>Code<span class="blue">Learn</span></span>
+    </div>
+
+    <nav id="navbar" class="nav-links"></nav>
+
+    <button id="tutorOpen" class="tutor-btn">
+        ✦ Tanya AI Tutor
+    </button>
+</header>
+
+<div id="homePage">
+    <section class="hero">
+        <div class="hero-content">
+            <span class="hero-label">CODING LEARNING PLATFORM</span>
+            <h1>Selamat Datang di <span class="blue">CodeLearn</span></h1>
+            <h2>Belajar Coding Dari Nol Hingga Mahir</h2>
+            <p>
+                Pelajari berbagai bahasa pemrograman, pahami sintaks,
+                praktik langsung, dan kembangkan kemampuan coding
+                melalui pembelajaran interaktif.
+            </p>
+            <button id="startLearning" class="primary-btn">
+                Mulai Belajar →
+            </button>
+        </div>
+    </section>
+
+    <section class="section">
+        <div class="section-heading">
+            <h2>Pilih Bahasa Pemrograman</h2>
+            <p>Mulai perjalanan coding kamu dengan bahasa pilihan.</p>
+        </div>
+
+        <div id="languageCards" class="language-grid"></div>
+    </section>
+
+    <section class="section features">
+        <div class="section-heading">
+            <h2>Kenapa CodeLearn?</h2>
+        </div>
+
+        <div class="feature-grid">
+            <article class="feature-card">
+                <div class="feature-icon">⌨</div>
+                <h3>Praktik Langsung</h3>
+                <p>
+                    Edit kode dan coba langsung di editor
+                    tanpa perlu menginstal software.
+                </p>
+            </article>
+
+            <article class="feature-card">
+                <div class="feature-icon">📚</div>
+                <h3>Materi Lengkap</h3>
+                <p>
+                    Pelajari konsep dasar hingga materi
+                    lanjutan dari berbagai bahasa.
+                </p>
+            </article>
+
+            <article class="feature-card">
+                <div class="feature-icon">✦</div>
+                <h3>AI Tutor 24/7</h3>
+                <p>
+                    Tanyakan kesulitan coding dan dapatkan
+                    penjelasan dari AI Tutor.
+                </p>
+            </article>
+        </div>
+    </section>
+
+    <footer class="footer">
+        CodeLearn · Belajar coding dengan praktik
+    </footer>
+</div>
+
+<div id="learningPage" class="learning-layout hidden">
+    <aside id="sidebar" class="sidebar">
+        <div class="sidebar-header">
+            <div>
+                <h2 id="sidebarTitle">Materi</h2>
+                <p id="sidebarSubtitle">Daftar pembelajaran</p>
+            </div>
+            <button id="sidebarClose" class="sidebar-close">×</button>
+        </div>
+
+        <input
+            id="topicSearch"
+            type="search"
+            placeholder="Cari materi..."
+            class="topic-search"
+        >
+
+        <div id="topicList"></div>
+    </aside>
+
+    <main class="lesson-area">
+        <div class="lesson-toolbar">
+            <button id="sidebarToggle" class="secondary-btn">
+                ☰ Materi
+            </button>
+
+            <button id="backHome" class="secondary-btn">
+                ← Beranda
+            </button>
+        </div>
+
+        <article class="lesson-card">
+            <div class="lesson-meta" id="lessonMeta"></div>
+            <h1 id="lessonTitle"></h1>
+            <p id="lessonDescription"></p>
+            <div id="lessonExplanation" class="lesson-tip"></div>
+        </article>
+
+        <section class="editor-card">
+            <div class="editor-header">
+                <div>
+                    <span class="editor-dot"></span>
+                    Code Editor
+                    <span id="fileName" class="file-name"></span>
+                </div>
+
+                <div class="editor-actions">
+                    <button id="copyCode" class="secondary-btn">
+                        Copy Code
+                    </button>
+
+                    <button id="runCode" class="run-btn">
+                        ▶ Run Code
+                    </button>
+                </div>
+            </div>
+
+            <textarea
+                id="codeEditor"
+                spellcheck="false"
+                aria-label="Code editor"
+            ></textarea>
+        </section>
+
+        <section class="output-card">
+            <div class="output-header">
+                <h3>Output / Console</h3>
+                <button id="clearOutput" class="secondary-btn">
+                    Clear
+                </button>
+            </div>
+
+            <div id="output" class="output"></div>
+
+            <iframe
+                id="preview"
+                title="Code Preview"
+                sandbox="allow-scripts"
+                class="preview hidden"
+            ></iframe>
+        </section>
+    </main>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<div id="tutorBackdrop" class="tutor-backdrop hidden"></div>
+
+<aside id="tutorPanel" class="tutor-panel">
+    <div class="tutor-header">
+        <div>
+            <h2>✦ CodeLearn AI Tutor</h2>
+            <p>Asisten belajar coding</p>
+        </div>
+
+        <button id="tutorClose" class="close-btn">×</button>
+    </div>
+
+    <div id="chatMessages" class="chat-messages">
+        <div class="chat-bubble ai">
+            Halo! Saya CodeLearn AI Tutor.
+            Tanyakan apa saja mengenai coding.
+        </div>
+    </div>
+
+    <div class="chat-input-area">
+        <textarea
+            id="chatInput"
+            placeholder="Tulis pertanyaan..."
+            rows="3"
+        ></textarea>
+
+        <button id="sendChat" class="send-btn">
+            Kirim
+        </button>
+    </div>
+</aside>
+
+<script src="materi-data.js"></script>
+<script src="script.js"></script>
+</body>
+</html>
