@@ -23,7 +23,7 @@ const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
 /* Urutan model: utama dulu, lalu cadangan otomatis */
 const GROQ_MODELS = [
-    "openai/gpt-oss-120b",
+    "llama-3.3-70b-versatile",
     "openai/gpt-oss-20b"
 ];
 
@@ -311,12 +311,41 @@ Panduan:
 
 /* ================================
    AI GROQ (PERULANGAN MODEL OTOMATIS)
-   1) openai/gpt-oss-120b
+   1) llama-3.3-70b-versatile
    2) openai/gpt-oss-20b
 ================================ */
 
+const SYSTEM_PROMPT =
+    "Kamu adalah CodeLearn AI Tutor. Jawab menggunakan bahasa Indonesia yang mudah dipahami oleh pemula. Jelaskan secara bertahap dan gunakan Markdown.";
+
 function estimateTokens(prompt, answer) {
     return Math.ceil((prompt.length + answer.length) / 3);
+}
+
+function buildGroqBody(model, prompt) {
+    const body = {
+        model,
+        messages: [
+            {
+                role: "system",
+                content: SYSTEM_PROMPT
+            },
+            {
+                role: "user",
+                content: prompt
+            }
+        ],
+        max_completion_tokens: MAX_OUTPUT_TOKENS,
+        temperature: 0.7
+    };
+
+    // Model gpt-oss adalah model penalaran: batasi "berpikir"
+    // agar token output tidak habis sebelum jawaban muncul.
+    if (model.startsWith("openai/gpt-oss")) {
+        body.reasoning_effort = "low";
+    }
+
+    return body;
 }
 
 async function requestAI(prompt) {
@@ -338,23 +367,7 @@ async function requestAI(prompt) {
                     Authorization: `Bearer ${apiKey}`,
                     "Content-Type": "application/json"
                 },
-                body: JSON.stringify({
-                    model,
-                    messages: [
-                        {
-                            role: "system",
-                            content:
-                                "Kamu adalah CodeLearn AI Tutor. Jawab menggunakan bahasa Indonesia yang mudah dipahami oleh pemula. Jelaskan secara bertahap dan gunakan Markdown."
-                        },
-                        {
-                            role: "user",
-                            content: prompt
-                        }
-                    ],
-                    max_completion_tokens: MAX_OUTPUT_TOKENS,
-                    reasoning_effort: "low",
-                    temperature: 0.7
-                }),
+                body: JSON.stringify(buildGroqBody(model, prompt)),
                 signal: AbortSignal.timeout(AI_TIMEOUT_MS)
             });
 
