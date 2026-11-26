@@ -1,49 +1,83 @@
-
 <!DOCTYPE html>
-<html lang="id">
+<html lang="id" data-theme="dark">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="description" content="CodeLearn: belajar HTML, CSS, JavaScript, Python, Java, dan C++ dengan praktik langsung dan AI Tutor.">
     <title>CodeLearn | Belajar Coding</title>
-    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- Terapkan tema tersimpan sebelum halaman tampil agar tidak berkedip -->
+    <script>
+        (function () {
+            try {
+                var saved = localStorage.getItem("codelearn-theme");
+                var theme = saved === "light" || saved === "dark"
+                    ? saved
+                    : (window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark");
+                document.documentElement.setAttribute("data-theme", theme);
+            } catch (e) {}
+        })();
+    </script>
+
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css">
 </head>
-<body class="bg-slate-950 text-slate-100">
+<body>
 
 <header class="topbar">
     <div class="brand">
         <span class="logo">C</span>
-        <span>Code<span class="blue">Learn</span></span>
+        <span>Code<span class="brand-accent">Learn</span></span>
     </div>
 
-    <nav id="navbar" class="nav-links"></nav>
+    <div class="topbar-actions">
+        <button id="themeToggle" class="icon-btn" type="button" aria-label="Ganti tema" title="Ganti tema">
+            <svg class="icon-sun" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <circle cx="12" cy="12" r="4"></circle>
+                <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"></path>
+            </svg>
+            <svg class="icon-moon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"></path>
+            </svg>
+        </button>
 
-    <button id="tutorOpen" class="tutor-btn">
-        ✦ Tanya AI Tutor
-    </button>
+        <button id="tutorOpen" class="tutor-btn" type="button">
+            <span aria-hidden="true">✦</span>
+            <span><span class="hide-sm">Tanya </span>AI Tutor</span>
+        </button>
+    </div>
+
+    <nav id="navbar" class="nav-links" aria-label="Navigasi bahasa"></nav>
 </header>
 
 <div id="homePage">
     <section class="hero">
         <div class="hero-content">
-            <span class="hero-label">CODING LEARNING PLATFORM</span>
-            <h1>Selamat Datang di <span class="blue">CodeLearn</span></h1>
-            <h2>Belajar Coding Dari Nol Hingga Mahir</h2>
-            <p>
-                Pelajari berbagai bahasa pemrograman, pahami sintaks,
-                praktik langsung, dan kembangkan kemampuan coding
-                melalui pembelajaran interaktif.
+            <p class="hero-label">Platform belajar coding</p>
+            <h1>Belajar coding dari nol, langsung praktik di browser.</h1>
+            <p class="hero-text">
+                Enam bahasa pemrograman, ratusan materi dengan penjelasan berbahasa Indonesia,
+                editor kode yang bisa langsung dijalankan, dan AI Tutor yang siap menjawab pertanyaanmu.
             </p>
-            <button id="startLearning" class="primary-btn">
-                Mulai Belajar →
-            </button>
+            <div class="hero-actions">
+                <button id="startLearning" class="primary-btn" type="button">Mulai belajar HTML</button>
+                <button id="heroTutor" class="ghost-btn" type="button">Tanya AI Tutor</button>
+            </div>
+
+            <dl class="hero-stats">
+                <div><dt>Bahasa</dt><dd id="statLanguages">6</dd></div>
+                <div><dt>Materi</dt><dd id="statTopics">250+</dd></div>
+                <div><dt>Kuota AI harian</dt><dd>10.000 token</dd></div>
+            </dl>
         </div>
     </section>
 
     <section class="section">
         <div class="section-heading">
-            <h2>Pilih Bahasa Pemrograman</h2>
-            <p>Mulai perjalanan coding kamu dengan bahasa pilihan.</p>
+            <h2>Pilih bahasa pemrograman</h2>
+            <p>Mulai dari bahasa yang paling sesuai dengan tujuanmu.</p>
         </div>
 
         <div id="languageCards" class="language-grid"></div>
@@ -56,30 +90,21 @@
 
         <div class="feature-grid">
             <article class="feature-card">
-                <div class="feature-icon">⌨</div>
-                <h3>Praktik Langsung</h3>
-                <p>
-                    Edit kode dan coba langsung di editor
-                    tanpa perlu menginstal software.
-                </p>
+                <div class="feature-icon" aria-hidden="true">⌨</div>
+                <h3>Praktik langsung</h3>
+                <p>Edit kode, tekan Run Code, dan lihat hasilnya tanpa menginstal software apa pun.</p>
             </article>
 
             <article class="feature-card">
-                <div class="feature-icon">📚</div>
-                <h3>Materi Lengkap</h3>
-                <p>
-                    Pelajari konsep dasar hingga materi
-                    lanjutan dari berbagai bahasa.
-                </p>
+                <div class="feature-icon" aria-hidden="true">📚</div>
+                <h3>Materi sesuai judul</h3>
+                <p>Setiap topik punya penjelasan sederhana dan contoh kode yang relevan dengan topiknya.</p>
             </article>
 
             <article class="feature-card">
-                <div class="feature-icon">✦</div>
-                <h3>AI Tutor 24/7</h3>
-                <p>
-                    Tanyakan kesulitan coding dan dapatkan
-                    penjelasan dari AI Tutor.
-                </p>
+                <div class="feature-icon" aria-hidden="true">✦</div>
+                <h3>AI Tutor</h3>
+                <p>Bingung dengan kode atau error? Tanyakan ke AI Tutor, ia membaca kode yang sedang kamu pelajari.</p>
             </article>
         </div>
     </section>
@@ -90,13 +115,15 @@
 </div>
 
 <div id="learningPage" class="learning-layout hidden">
-    <aside id="sidebar" class="sidebar">
+    <div id="sidebarBackdrop" class="drawer-backdrop hidden"></div>
+
+    <aside id="sidebar" class="sidebar" aria-label="Daftar materi">
         <div class="sidebar-header">
             <div>
                 <h2 id="sidebarTitle">Materi</h2>
                 <p id="sidebarSubtitle">Daftar pembelajaran</p>
             </div>
-            <button id="sidebarClose" class="sidebar-close">×</button>
+            <button id="sidebarClose" class="sidebar-close" type="button" aria-label="Tutup daftar materi">×</button>
         </div>
 
         <input
@@ -104,20 +131,22 @@
             type="search"
             placeholder="Cari materi..."
             class="topic-search"
+            autocomplete="off"
         >
 
-        <div id="topicList"></div>
+        <div id="topicList" class="topic-list"></div>
     </aside>
 
     <main class="lesson-area">
         <div class="lesson-toolbar">
-            <button id="sidebarToggle" class="secondary-btn">
-                ☰ Materi
+            <button id="sidebarToggle" class="secondary-btn" type="button" aria-label="Buka daftar materi">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true">
+                    <path d="M3 6h18M3 12h18M3 18h18"></path>
+                </svg>
+                <span>Daftar Materi</span>
             </button>
 
-            <button id="backHome" class="secondary-btn">
-                ← Beranda
-            </button>
+            <button id="backHome" class="secondary-btn" type="button">← Beranda</button>
         </div>
 
         <article class="lesson-card">
@@ -129,68 +158,84 @@
 
         <section class="editor-card">
             <div class="editor-header">
-                <div>
+                <div class="editor-title">
                     <span class="editor-dot"></span>
-                    Code Editor
+                    <span>Code Editor</span>
                     <span id="fileName" class="file-name"></span>
                 </div>
 
                 <div class="editor-actions">
-                    <button id="copyCode" class="secondary-btn">
-                        Copy Code
-                    </button>
-
-                    <button id="runCode" class="run-btn">
-                        ▶ Run Code
-                    </button>
+                    <button id="resetCode" class="secondary-btn" type="button">Reset</button>
+                    <button id="copyCode" class="secondary-btn" type="button">Copy Code</button>
+                    <button id="runCode" class="run-btn" type="button">▶ Run Code</button>
                 </div>
             </div>
 
             <textarea
                 id="codeEditor"
                 spellcheck="false"
+                autocomplete="off"
+                autocapitalize="off"
+                autocorrect="off"
+                wrap="off"
                 aria-label="Code editor"
             ></textarea>
+
+            <div id="stdinBox" class="stdin-box hidden">
+                <label for="stdinInput">Input program (stdin), satu baris untuk tiap masukan</label>
+                <textarea id="stdinInput" rows="2" spellcheck="false" wrap="off"></textarea>
+            </div>
         </section>
 
         <section class="output-card">
             <div class="output-header">
-                <h3>Output / Console</h3>
-                <button id="clearOutput" class="secondary-btn">
-                    Clear
-                </button>
+                <div class="output-title">
+                    <h3>Output / Console</h3>
+                    <span id="runStatus" class="run-status"></span>
+                </div>
+                <button id="clearOutput" class="secondary-btn" type="button">Clear</button>
             </div>
 
-            <div id="output" class="output"></div>
+            <pre id="output" class="output"></pre>
 
             <iframe
                 id="preview"
                 title="Code Preview"
-                sandbox="allow-scripts"
+                sandbox="allow-scripts allow-modals allow-popups"
                 class="preview hidden"
             ></iframe>
         </section>
+
+        <nav class="lesson-nav" aria-label="Navigasi materi">
+            <button id="prevTopic" class="secondary-btn" type="button">← Sebelumnya</button>
+            <button id="nextTopic" class="primary-btn small" type="button">Selanjutnya →</button>
+        </nav>
     </main>
 </div>
 
-<div id="toast" class="toast hidden"></div>
+<div id="toast" class="toast hidden" role="status"></div>
 
 <div id="tutorBackdrop" class="tutor-backdrop hidden"></div>
 
-<aside id="tutorPanel" class="tutor-panel">
+<aside id="tutorPanel" class="tutor-panel" aria-label="CodeLearn AI Tutor" aria-hidden="true">
     <div class="tutor-header">
         <div>
             <h2>✦ CodeLearn AI Tutor</h2>
             <p>Asisten belajar coding</p>
         </div>
 
-        <button id="tutorClose" class="close-btn">×</button>
+        <button id="tutorClose" class="close-btn" type="button" aria-label="Tutup AI Tutor">×</button>
+    </div>
+
+    <div id="quotaBox" class="quota-box">
+        <div id="quotaText" class="quota-text">Kuota Harian: memuat...</div>
+        <div class="quota-track"><div id="quotaBar" class="quota-bar"></div></div>
     </div>
 
     <div id="chatMessages" class="chat-messages">
         <div class="chat-bubble ai">
-            Halo! Saya CodeLearn AI Tutor.
-            Tanyakan apa saja mengenai coding.
+            Halo! Saya CodeLearn AI Tutor. Tanyakan apa saja tentang coding,
+            saya bisa membaca kode yang sedang kamu buka di editor.
         </div>
     </div>
 
@@ -198,12 +243,11 @@
         <textarea
             id="chatInput"
             placeholder="Tulis pertanyaan..."
-            rows="3"
+            rows="2"
+            maxlength="1000"
         ></textarea>
 
-        <button id="sendChat" class="send-btn">
-            Kirim
-        </button>
+        <button id="sendChat" class="send-btn" type="button">Kirim</button>
     </div>
 </aside>
 
