@@ -8,25 +8,16 @@ const crypto = require("crypto");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-/* ================================
-   KONFIGURASI
-================================ */
-
 const DAILY_TOKEN_LIMIT_PER_USER = 10000;
 
 const MAX_CODE_CONTEXT_CHARS = 2500;
 const MAX_QUESTION_CHARS = 2000;
 const MAX_OUTPUT_TOKENS = 2048;
 
-const AI_TIMEOUT_MS = 25000;
-const RUN_TIMEOUT_MS = 25000;
+const GEMINI_MODEL = "gemini-4-hydrogen";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-
-const GROQ_MODELS = [
-    "llama-3.3-70b-versatile",
-    "openai/gpt-oss-20b"
-];
+const GROQ_MODEL = "llama-3.3-70b-versatile";
 
 const REDIS_URL =
     process.env.KV_REST_API_URL ||
@@ -49,7 +40,6 @@ app.use(express.static(path.join(__dirname, "public")));
 
 function getClientIp(req) {
     const forwarded = req.headers["x-forwarded-for"];
-
     let ip = "";
 
     if (forwarded) {
@@ -67,15 +57,51 @@ function getDeviceId(req) {
     const rawDeviceId =
         req.body?.deviceId ||
         req.headers["x-device-id"] ||
-        req.query?.deviceId ||
         "default-device";
 
-    const deviceId = String(rawDeviceId)
+    return String(rawDeviceId)
         .trim()
         .slice(0, 100)
         .replace(/[^a-zA-Z0-9_-]/g, "");
+}
 
-    return deviceId || "default-device";
+function getTodayKey() {
+    return new Intl.DateTimeFormat("en-CA", {
+        timeZone: "Asia/Jakarta",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+    }).format(new Date());
+}
+
+function getSecondsUntilJakartaMidnight() {
+    const now = new Date();
+
+    const parts = new Intl.DateTimeFormat("en-US", {
+        timeZone: "Asia/Jakarta",
+        year: "numeric",
+        month: "2-digit",
+        day: "2-digit"
+    }).formatToParts(now);
+
+    const values = {};
+
+    for (const part of parts) {
+        values[part.type] = part.value;
+    }
+
+    const year = Number(values.year);
+    const month = Number(values.month);
+    const day = Number(values.day);
+
+    const nextMidnightUtc =
+        Date.UTC(year, month - 1, day + 1) -
+        (7 * 60 * 60 * 1000);
+
+    return Math.max(
+        1,
+        Math.ceil((nextMidnightUtc - now.getTime()) / 1000)
+    );
 }
 
 function hashIdentity(value) {
@@ -85,55 +111,8 @@ function hashIdentity(value) {
         .digest("hex");
 }
 
-/* ================================
-   WAKTU WIB (ASIA/JAKARTA)
-================================ */
-
-function getJakartaDateParts(date = new Date()) {
-    const parts = new Intl.DateTimeFormat("en-US", {
-        timeZone: "Asia/Jakarta",
-        year: "numeric",
-        month: "2-digit",
-        day: "2-digit"
-    }).formatToParts(date);
-
-    const values = {};
-
-    for (const part of parts) {
-        values[part.type] = part.value;
-    }
-
-    return {
-        year: Number(values.year),
-        month: Number(values.month),
-        day: Number(values.day),
-        text: `${values.year}-${values.month}-${values.day}`
-    };
-}
-
-function getTodayKey() {
-    return getJakartaDateParts().text;
-}
-
-function getSecondsUntilJakartaMidnight() {
-    const now = new Date();
-    const { year, month, day } = getJakartaDateParts(now);
-
-    const nextMidnightUtc =
-        Date.UTC(year, month - 1, day + 1) -
-        7 * 60 * 60 * 1000;
-
-    return Math.max(
-        1,
-        Math.ceil(
-            (nextMidnightUtc - now.getTime()) / 1000
-        )
-    );
-}
-
 function getUsageKey(req) {
     const date = getTodayKey();
-
     const ip = hashIdentity(getClientIp(req));
     const deviceId = hashIdentity(getDeviceId(req));
 
@@ -162,7 +141,8 @@ function memoryGet(key) {
 }
 
 function memoryIncrBy(key, amount) {
-    const value = memoryGet(key) + amount;
+    const current = memoryGet(key);
+    const value = current + amount;
 
     memoryStore.set(key, {
         value,
@@ -220,16 +200,17 @@ async function getUsedTokens(key) {
 
         return Number(value) || 0;
     } catch (error) {
-        console.error("Redis GET gagal:", error.message);
+        console.error(
+            "Redis GET gagal, memakai memori sementara:",
+            error.message
+        );
+
         return memoryGet(key);
     }
 }
 
 async function addUsedTokens(key, tokens) {
-    const amount = Math.max(
-        0,
-        Math.ceil(Number(tokens) || 0)
-    );
+    const amount = Math.max(0, Math.ceil(Number(tokens) || 0));
 
     if (!amount) {
         return getUsedTokens(key);
@@ -249,7 +230,11 @@ async function addUsedTokens(key, tokens) {
 
         return Number(total) || 0;
     } catch (error) {
-        console.error("Redis INCRBY gagal:", error.message);
+        console.error(
+            "Redis INCRBY gagal, memakai memori sementara:",
+            error.message
+        );
+
         return memoryIncrBy(key, amount);
     }
 }
@@ -271,7 +256,7 @@ function buildQuota(usedTokens) {
 }
 
 /* ================================
-   MEMBANGUN PROMPT
+   MEMBANGUN PROMPT AI
 ================================ */
 
 function buildPrompt({
@@ -309,140 +294,256 @@ Panduan:
 }
 
 /* ================================
-   GROQ AI
+   GOOGLE GEMINI UTAMA
 ================================ */
 
-const SYSTEM_PROMPT =
-    "Kamu adalah CodeLearn AI Tutor. Jawab menggunakan bahasa Indonesia yang mudah dipahami oleh pemula. Jelaskan secara bertahap dan gunakan Markdown.";
+async function requestGemini(prompt) {
+    const apiKey = process.env.GEMINI_API_KEY;
 
-function estimateTokens(prompt, answer) {
-    return Math.ceil(
-        (prompt.length + answer.length) / 3
-    );
-}
-
-function buildGroqBody(model, prompt) {
-    const body = {
-        model,
-        messages: [
-            {
-                role: "system",
-                content: SYSTEM_PROMPT
-            },
-            {
-                role: "user",
-                content: prompt
-            }
-        ],
-        max_tokens: MAX_OUTPUT_TOKENS,
-        temperature: 0.7
-    };
-
-    if (model.startsWith("openai/gpt-oss")) {
-        body.reasoning_effort = "low";
+    if (!apiKey) {
+        return {
+            ok: false,
+            provider: "gemini",
+            status: 500,
+            message: "GEMINI_API_KEY belum diatur."
+        };
     }
 
-    return body;
+    try {
+        const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": apiKey
+                },
+                body: JSON.stringify({
+                    contents: [
+                        {
+                            parts: [
+                                {
+                                    text: prompt
+                                }
+                            ]
+                        }
+                    ],
+                    generationConfig: {
+                        maxOutputTokens: MAX_OUTPUT_TOKENS
+                    }
+                })
+            }
+        );
+
+        const raw = await response.text();
+        let data = {};
+
+        try {
+            data = raw ? JSON.parse(raw) : {};
+        } catch {
+            return {
+                ok: false,
+                provider: "gemini",
+                status: 502,
+                message: "Respons Gemini tidak valid."
+            };
+        }
+
+        if (!response.ok) {
+            return {
+                ok: false,
+                provider: "gemini",
+                status: response.status,
+                message:
+                    data.error?.message ||
+                    `Gemini gagal dengan status ${response.status}.`
+            };
+        }
+
+        const answer = data.candidates?.[0]?.content?.parts
+            ?.map(part => part.text || "")
+            .join("\n")
+            .trim();
+
+        if (!answer) {
+            return {
+                ok: false,
+                provider: "gemini",
+                status: 502,
+                message: "Gemini tidak menghasilkan jawaban."
+            };
+        }
+
+        const totalTokens = Number(
+            data.usageMetadata?.totalTokenCount
+        );
+
+        return {
+            ok: true,
+            provider: "gemini",
+            model: GEMINI_MODEL,
+            answer,
+            totalTokens:
+                Number.isFinite(totalTokens) && totalTokens > 0
+                    ? totalTokens
+                    : Math.ceil((prompt.length + answer.length) / 3)
+        };
+    } catch (error) {
+        return {
+            ok: false,
+            provider: "gemini",
+            status: 503,
+            message:
+                error.message ||
+                "Tidak dapat menghubungi Gemini."
+        };
+    }
 }
 
-async function requestAI(prompt) {
+/* ================================
+   GROQ CADANGAN
+================================ */
+
+async function requestGroq(prompt) {
     const apiKey = process.env.GROQ_API_KEY;
 
     if (!apiKey) {
-        const error = new Error(
-            "GROQ_API_KEY belum diatur."
+        return {
+            ok: false,
+            provider: "groq",
+            status: 500,
+            message: "GROQ_API_KEY belum diatur."
+        };
+    }
+
+    try {
+        const response = await fetch(GROQ_URL, {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${apiKey}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify({
+                model: GROQ_MODEL,
+                messages: [
+                    {
+                        role: "system",
+                        content:
+                            "Kamu adalah CodeLearn AI Tutor. Jawab menggunakan bahasa Indonesia yang mudah dipahami oleh pemula. Jelaskan secara bertahap dan gunakan Markdown."
+                    },
+                    {
+                        role: "user",
+                        content: prompt
+                    }
+                ],
+                max_tokens: MAX_OUTPUT_TOKENS,
+                temperature: 0.7
+            })
+        });
+
+        const raw = await response.text();
+        let data = {};
+
+        try {
+            data = raw ? JSON.parse(raw) : {};
+        } catch {
+            return {
+                ok: false,
+                provider: "groq",
+                status: 502,
+                message: "Respons Groq tidak valid."
+            };
+        }
+
+        if (!response.ok) {
+            return {
+                ok: false,
+                provider: "groq",
+                status: response.status,
+                message:
+                    data.error?.message ||
+                    `Groq gagal dengan status ${response.status}.`
+            };
+        }
+
+        const answer = data.choices?.[0]?.message?.content?.trim();
+
+        if (!answer) {
+            return {
+                ok: false,
+                provider: "groq",
+                status: 502,
+                message: "Groq tidak menghasilkan jawaban."
+            };
+        }
+
+        const totalTokens = Number(
+            data.usage?.total_tokens
         );
 
-        error.status = 500;
-        throw error;
+        return {
+            ok: true,
+            provider: "groq",
+            model: GROQ_MODEL,
+            answer,
+            totalTokens:
+                Number.isFinite(totalTokens) && totalTokens > 0
+                    ? totalTokens
+                    : Math.ceil((prompt.length + answer.length) / 3)
+        };
+    } catch (error) {
+        return {
+            ok: false,
+            provider: "groq",
+            status: 503,
+            message:
+                error.message ||
+                "Tidak dapat menghubungi Groq."
+        };
+    }
+}
+
+/* ================================
+   HYBRID AI
+================================ */
+
+async function askAI(prompt) {
+    const geminiResult = await requestGemini(prompt);
+
+    if (geminiResult.ok) {
+        console.log("AI berhasil menggunakan Gemini.");
+
+        return geminiResult;
     }
 
-    const failures = [];
-
-    for (const model of GROQ_MODELS) {
-        try {
-            const response = await fetch(GROQ_URL, {
-                method: "POST",
-                headers: {
-                    Authorization: `Bearer ${apiKey}`,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify(
-                    buildGroqBody(model, prompt)
-                ),
-                signal: AbortSignal.timeout(AI_TIMEOUT_MS)
-            });
-
-            const raw = await response.text();
-
-            let data = {};
-
-            try {
-                data = raw ? JSON.parse(raw) : {};
-            } catch {
-                throw new Error(
-                    "Respons Groq tidak valid."
-                );
-            }
-
-            if (!response.ok) {
-                throw new Error(
-                    data.error?.message ||
-                    `Gagal dengan status ${response.status}.`
-                );
-            }
-
-            const answer =
-                data.choices?.[0]?.message?.content?.trim();
-
-            if (!answer) {
-                throw new Error(
-                    "Model tidak menghasilkan jawaban."
-                );
-            }
-
-            const totalTokens = Number(
-                data.usage?.total_tokens
-            );
-
-            console.log(
-                `Groq berhasil menggunakan model ${model}.`
-            );
-
-            return {
-                provider: "groq",
-                model,
-                answer,
-                totalTokens:
-                    Number.isFinite(totalTokens) &&
-                    totalTokens > 0
-                        ? totalTokens
-                        : estimateTokens(prompt, answer)
-            };
-        } catch (error) {
-            const message =
-                error.name === "TimeoutError" ||
-                error.name === "AbortError"
-                    ? "Timeout."
-                    : error.message ||
-                      "Tidak dapat menghubungi Groq.";
-
-            console.error(
-                `Model ${model} gagal:`,
-                message
-            );
-
-            failures.push(
-                `${model}: ${message}`
-            );
-        }
-    }
-
-    const error = new Error(
-        `Semua model Groq gagal. ${failures.join(" | ")}`
+    console.error(
+        "Gemini gagal. Beralih ke Groq:",
+        geminiResult.status,
+        geminiResult.message
     );
 
-    error.status = 503;
+    const groqResult = await requestGroq(prompt);
+
+    if (groqResult.ok) {
+        console.log("AI berhasil menggunakan Groq sebagai cadangan.");
+
+        return groqResult;
+    }
+
+    console.error(
+        "Groq juga gagal:",
+        groqResult.status,
+        groqResult.message
+    );
+
+    const error = new Error(
+        `Gemini gagal: ${geminiResult.message} | Groq gagal: ${groqResult.message}`
+    );
+
+    error.status =
+        groqResult.status >= 400 && groqResult.status < 600
+            ? groqResult.status
+            : 503;
 
     throw error;
 }
@@ -455,11 +556,9 @@ app.get("/api/health", (req, res) => {
     res.json({
         status: "ok",
         version: "2.1",
-        provider: "groq",
-        primaryAI: GROQ_MODELS[0],
-        fallbackAI: GROQ_MODELS[1],
-        quotaLimit: DAILY_TOKEN_LIMIT_PER_USER,
-        redis: isRedisConfigured()
+        primaryAI: GEMINI_MODEL,
+        fallbackAI: GROQ_MODEL,
+        quotaLimit: DAILY_TOKEN_LIMIT_PER_USER
     });
 });
 
@@ -475,10 +574,7 @@ app.get("/api/quota", async (req, res) => {
 
         return res.json(buildQuota(used));
     } catch (error) {
-        console.error(
-            "Gagal membaca kuota:",
-            error.message
-        );
+        console.error("Gagal membaca kuota:", error);
 
         return res.status(500).json({
             error: "Gagal membaca kuota."
@@ -499,28 +595,25 @@ app.post("/api/tutor", async (req, res) => {
             code
         } = req.body || {};
 
-        if (
-            !question ||
-            !String(question).trim()
-        ) {
+        if (!question || !String(question).trim()) {
             return res.status(400).json({
                 error: "Pertanyaan tidak boleh kosong."
             });
         }
 
-        if (!process.env.GROQ_API_KEY) {
+        if (
+            !process.env.GEMINI_API_KEY &&
+            !process.env.GROQ_API_KEY
+        ) {
             return res.status(500).json({
-                error: "GROQ_API_KEY belum diatur."
+                error: "GEMINI_API_KEY dan GROQ_API_KEY belum diatur."
             });
         }
 
         const usageKey = getUsageKey(req);
         const usedBefore = await getUsedTokens(usageKey);
 
-        if (
-            usedBefore >=
-            DAILY_TOKEN_LIMIT_PER_USER
-        ) {
+        if (usedBefore >= DAILY_TOKEN_LIMIT_PER_USER) {
             return res.status(429).json({
                 error:
                     "Kuota AI harian Anda (10.000 token) sudah habis. Silakan kembali besok!",
@@ -535,7 +628,7 @@ app.post("/api/tutor", async (req, res) => {
             code
         });
 
-        const result = await requestAI(prompt);
+        const result = await askAI(prompt);
 
         const usedAfter = await addUsedTokens(
             usageKey,
@@ -549,12 +642,14 @@ app.post("/api/tutor", async (req, res) => {
             ...buildQuota(usedAfter)
         });
     } catch (error) {
-        console.error(
-            "Kesalahan backend:",
-            error.message
-        );
+        console.error("Kesalahan backend:", error);
 
-        return res.status(error.status || 500).json({
+        const status =
+            error.status >= 400 && error.status < 600
+                ? error.status
+                : 500;
+
+        return res.status(status).json({
             error:
                 error.message ||
                 "Terjadi kesalahan pada backend."
@@ -609,10 +704,7 @@ app.post("/api/run", async (req, res) => {
             });
         }
 
-        if (
-            !code ||
-            !String(code).trim()
-        ) {
+        if (!code || !String(code).trim()) {
             return res.status(400).json({
                 error: "Kode kosong."
             });
@@ -625,11 +717,7 @@ app.post("/api/run", async (req, res) => {
             });
         }
 
-        if (
-            isRunRateLimited(
-                getClientIp(req)
-            )
-        ) {
+        if (isRunRateLimited(getClientIp(req))) {
             return res.status(429).json({
                 error:
                     "Terlalu banyak eksekusi. Coba lagi sebentar lagi."
@@ -641,35 +729,26 @@ app.post("/api/run", async (req, res) => {
         };
 
         if (process.env.PISTON_API_KEY) {
-            headers.Authorization =
-                process.env.PISTON_API_KEY;
+            headers.Authorization = process.env.PISTON_API_KEY;
         }
 
-        const pistonResponse = await fetch(
-            PISTON_URL,
-            {
-                method: "POST",
-                headers,
-                body: JSON.stringify({
-                    language: config.piston,
-                    version: "*",
-                    files: [
-                        {
-                            name: config.file,
-                            content: String(code)
-                        }
-                    ],
-                    stdin: String(stdin || "")
-                        .slice(0, 2000)
-                }),
-                signal: AbortSignal.timeout(
-                    RUN_TIMEOUT_MS
-                )
-            }
-        );
+        const pistonResponse = await fetch(PISTON_URL, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+                language: config.piston,
+                version: "*",
+                files: [
+                    {
+                        name: config.file,
+                        content: String(code)
+                    }
+                ],
+                stdin: String(stdin || "").slice(0, 2000)
+            })
+        });
 
         const raw = await pistonResponse.text();
-
         let data;
 
         try {
@@ -689,10 +768,7 @@ app.post("/api/run", async (req, res) => {
             });
         }
 
-        if (
-            data.compile &&
-            data.compile.code !== 0
-        ) {
+        if (data.compile && data.compile.code !== 0) {
             return res.json({
                 stage: "compile",
                 exitCode: data.compile.code,
@@ -709,16 +785,11 @@ app.post("/api/run", async (req, res) => {
             output: data.run?.output ?? ""
         });
     } catch (error) {
-        console.error(
-            "Gagal menjalankan kode:",
-            error.message
-        );
+        console.error("Gagal menjalankan kode:", error);
 
         return res.status(502).json({
             error:
-                error.name === "TimeoutError"
-                    ? "Eksekusi kode mengalami timeout."
-                    : "Tidak dapat menghubungi layanan eksekusi kode."
+                "Tidak dapat menghubungi layanan eksekusi kode."
         });
     }
 });
