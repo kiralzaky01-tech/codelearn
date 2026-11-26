@@ -25,10 +25,10 @@ const GEMINI_MODELS = [
     process.env.GEMINI_FALLBACK_MODEL || "gemini-3.8-flash"
 ];
 
-const MAX_CODE_CONTEXT_CHARS = 1500;
-const MAX_QUESTION_CHARS = 1000;
-const MAX_OUTPUT_TOKENS = 1024;
-const QUOTA_TTL_SECONDS = 86400;
+const MAX_CODE_CONTEXT_CHARS = 2500; // Dinaikkan agar kode utuh terbaca AI tanpa terpotong di tengah
+const MAX_QUESTION_CHARS =  2000;     // Tetap (sudah cukup untuk ~150 kata pertanyaan siswa)
+const MAX_OUTPUT_TOKENS = 2048;      // Dinaikkan agar penjelasan + contoh kode tidak terpotong di tengah
+const QUOTA_TTL_SECONDS = 86400;     // Tetap (otomatis reset tepat 24 jam)
 
 // Eksekusi kode Java / C++ lewat Piston (bisa diganti dengan instance sendiri)
 const PISTON_URL =
