@@ -11,20 +11,25 @@ app.use(express.json({ limit: "1mb" }));
 app.use(express.static(path.join(__dirname, "public")));
 
 app.get("/api/health", (req, res) => {
-    res.json({ status: "ok" });
+    res.json({
+        status: "ok",
+        message: "CodeLearn backend berjalan"
+    });
 });
 
 app.post("/api/tutor", async (req, res) => {
     try {
         const { question, language, topic, code } = req.body || {};
 
-        if (!question || !question.trim()) {
+        if (!question || typeof question !== "string" || !question.trim()) {
             return res.status(400).json({
                 error: "Pertanyaan tidak boleh kosong."
             });
         }
 
-        if (!process.env.GEMINI_API_KEY) {
+        const apiKey = process.env.GEMINI_API_KEY;
+
+        if (!apiKey) {
             return res.status(500).json({
                 error: "GEMINI_API_KEY belum diatur pada file .env."
             });
@@ -49,19 +54,21 @@ Panduan:
 - Berikan contoh kode jika diperlukan.
 - Jika ada kesalahan kode, jelaskan penyebab dan perbaikannya.
 - Gunakan format Markdown.
+- Jangan memberikan penjelasan yang terlalu rumit untuk pemula.
 `;
 
         const geminiResponse = await fetch(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
             {
                 method: "POST",
                 headers: {
                     "Content-Type": "application/json",
-                    "x-goog-api-key": process.env.GEMINI_API_KEY
+                    "x-goog-api-key": apiKey
                 },
                 body: JSON.stringify({
                     contents: [
                         {
+                            role: "user",
                             parts: [
                                 {
                                     text: prompt
@@ -83,7 +90,7 @@ Panduan:
 
         try {
             data = rawResponse ? JSON.parse(rawResponse) : {};
-        } catch (parseError) {
+        } catch (error) {
             console.error("Respons Gemini bukan JSON:", rawResponse);
 
             return res.status(502).json({
@@ -102,7 +109,8 @@ Panduan:
 
         const answer = data.candidates?.[0]?.content?.parts
             ?.map(part => part.text || "")
-            .join("\n");
+            .join("\n")
+            .trim();
 
         if (!answer) {
             console.error("Respons kosong Gemini:", data);
@@ -112,7 +120,9 @@ Panduan:
             });
         }
 
-        return res.json({ answer });
+        return res.json({
+            answer: answer
+        });
 
     } catch (error) {
         console.error("Kesalahan backend:", error);
@@ -123,11 +133,12 @@ Panduan:
     }
 });
 
-// Saat dijalankan langsung (Render/lokal): nyalakan server.
-// Saat diimpor Vercel: cukup ekspor app sebagai serverless function.
 if (require.main === module) {
     app.listen(PORT, () => {
-        console.log(`CodeLearn berjalan di http://localhost:${PORT}`);
+        console.log("--------------------------------");
+        console.log("       CODELEARN SERVER");
+        console.log("--------------------------------");
+        console.log(`Server berjalan di http://localhost:${PORT}`);
     });
 }
 
