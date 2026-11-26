@@ -17,11 +17,94 @@ app.get("/api/health", (req, res) => {
     });
 });
 
+// Model utama dan cadangan
+const FALLBACK_MODELS = [
+    "gemini-4-hydrogen",
+    "gemini-3.8-flash"
+];
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Mengirim permintaan ke Gemini dengan retry otomatis
+async function requestGemini(model, prompt, apiKey) {
+    const maxRetries = 3;
+
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+        const response = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
+            {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "x-goog-api-key": apiKey
+                },
+                body: JSON.stringify({
+                    contents: [
+                        {
+                            role: "user",
+                            parts: [
+                                {
+                                    text: prompt
+                                }
+                            ]
+                        }
+                    ],
+                    generationConfig: {
+                        temperature: 0.7,
+                        maxOutputTokens: 4096
+                    }
+                })
+            }
+        );
+
+        const rawResponse = await response.text();
+
+        let data;
+
+        try {
+            data = rawResponse ? JSON.parse(rawResponse) : {};
+        } catch (error) {
+            throw new Error("Respons Gemini bukan JSON yang valid.");
+        }
+
+        if (response.ok) {
+            return data;
+        }
+
+        const retryable = [429, 500, 502, 503, 504].includes(response.status);
+
+        if (retryable && attempt < maxRetries - 1) {
+            const delay = 2000 * Math.pow(2, attempt);
+
+            console.warn(
+                `Model ${model} mengalami gangguan (${response.status}). Mencoba ulang dalam ${delay / 1000} detik...`
+            );
+
+            await sleep(delay);
+            continue;
+        }
+
+        const error = new Error(
+            data.error?.message || `Gemini API error ${response.status}`
+        );
+
+        error.status = response.status;
+        throw error;
+    }
+
+    throw new Error("Gemini gagal memberikan respons.");
+}
+
+// AI Tutor
 app.post("/api/tutor", async (req, res) => {
     try {
         const { question, language, topic, code } = req.body || {};
 
-        if (!question || typeof question !== "string" || !question.trim()) {
+        if (
+            !question ||
+            typeof question !== "string" ||
+            !question.trim()
+        ) {
             return res.status(400).json({
                 error: "Pertanyaan tidak boleh kosong."
             });
@@ -57,71 +140,64 @@ Panduan:
 - Jangan memberikan penjelasan yang terlalu rumit untuk pemula.
 `;
 
-        const geminiResponse = await fetch(
-            "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent",
-            {
-                method: "POST",
-                headers: {
-                    "Content-Type": "application/json",
-                    "x-goog-api-key": apiKey
-                },
-                body: JSON.stringify({
-                    contents: [
-                        {
-                            role: "user",
-                            parts: [
-                                {
-                                    text: prompt
-                                }
-                            ]
-                        }
-                    ],
-                    generationConfig: {
-                        temperature: 0.7,
-                        maxOutputTokens: 4096
-                    }
-                })
+        let lastError = null;
+
+        for (const model of FALLBACK_MODELS) {
+            try {
+                console.log(`Mencoba model Gemini: ${model}`);
+
+                const data = await requestGemini(
+                    model,
+                    prompt,
+                    apiKey
+                );
+
+                const answer = data.candidates?.[0]?.content?.parts
+                    ?.map((part) => part.text || "")
+                    .join("\n")
+                    .trim();
+
+                if (answer) {
+                    console.log(`Berhasil menggunakan model: ${model}`);
+
+                    return res.json({
+                        answer,
+                        model
+                    });
+                }
+
+                lastError = new Error(
+                    `Model ${model} tidak menghasilkan jawaban.`
+                );
+
+            } catch (error) {
+                lastError = error;
+
+                console.warn(
+                    `Model ${model} gagal: ${error.message}`
+                );
+
+                if (
+                    error.status === 404 ||
+                    error.status === 429 ||
+                    error.status === 500 ||
+                    error.status === 502 ||
+                    error.status === 503 ||
+                    error.status === 504
+                ) {
+                    continue;
+                }
+
+                return res.status(error.status || 500).json({
+                    error: error.message
+                });
             }
-        );
-
-        const rawResponse = await geminiResponse.text();
-
-        let data;
-
-        try {
-            data = rawResponse ? JSON.parse(rawResponse) : {};
-        } catch (error) {
-            console.error("Respons Gemini bukan JSON:", rawResponse);
-
-            return res.status(502).json({
-                error: "Gemini memberikan respons yang tidak valid."
-            });
         }
 
-        if (!geminiResponse.ok) {
-            console.error("Gemini API error:", data);
+        console.error("Semua model Gemini gagal:", lastError);
 
-            return res.status(geminiResponse.status).json({
-                error: data.error?.message ||
-                    `Gemini API gagal dengan status ${geminiResponse.status}.`
-            });
-        }
-
-        const answer = data.candidates?.[0]?.content?.parts
-            ?.map(part => part.text || "")
-            .join("\n")
-            .trim();
-
-        if (!answer) {
-            console.error("Respons kosong Gemini:", data);
-
-            return res.status(502).json({
-                error: "Gemini tidak menghasilkan jawaban. Coba pertanyaan lain."
-            });
-        }
-
-        return res.json({
-            answer: answer
+        return res.status(lastError?.status || 503).json({
+            error: "Semua model AI sedang tidak tersedia. Silakan coba lagi beberapa saat."
         });
 
     } catch (error) {
@@ -133,12 +209,10 @@ Panduan:
     }
 });
 
+// Menjalankan server
 if (require.main === module) {
     app.listen(PORT, () => {
-        console.log("--------------------------------");
-        console.log("       CODELEARN SERVER");
-        console.log("--------------------------------");
-        console.log(`Server berjalan di http://localhost:${PORT}`);
+        console.log(`CodeLearn berjalan di http://localhost:${PORT}`);
     });
 }
 
