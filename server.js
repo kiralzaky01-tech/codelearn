@@ -19,11 +19,13 @@ const MAX_OUTPUT_TOKENS = 2048;
 
 const AI_TIMEOUT_MS = 25000;
 
-const GEMINI_MODEL = "gemini-4-hydrogen";
-const GEMINI_URL = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`;
-
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
-const GROQ_MODEL = "llama-3.3-70b-versatile";
+
+/* Urutan model: utama dulu, lalu cadangan otomatis */
+const GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "openai/gpt-oss-20b"
+];
 
 const REDIS_URL =
     process.env.KV_REST_API_URL ||
@@ -308,111 +310,36 @@ Panduan:
 }
 
 /* ================================
-   HYBRID AI TERPADU
-   Prioritas 1: Gemini (1x percobaan)
-   Cadangan   : Groq
+   AI GROQ (PERULANGAN MODEL OTOMATIS)
+   1) openai/gpt-oss-120b
+   2) openai/gpt-oss-20b
 ================================ */
-
-async function postJson(url, headers, body) {
-    const response = await fetch(url, {
-        method: "POST",
-        headers: {
-            "Content-Type": "application/json",
-            ...headers
-        },
-        body: JSON.stringify(body),
-        signal: AbortSignal.timeout(AI_TIMEOUT_MS)
-    });
-
-    const raw = await response.text();
-
-    let data = {};
-
-    try {
-        data = raw ? JSON.parse(raw) : {};
-    } catch {
-        throw new Error("Respons tidak valid (bukan JSON).");
-    }
-
-    if (!response.ok) {
-        throw new Error(
-            data.error?.message ||
-            `Gagal dengan status ${response.status}.`
-        );
-    }
-
-    return data;
-}
 
 function estimateTokens(prompt, answer) {
     return Math.ceil((prompt.length + answer.length) / 3);
 }
 
 async function requestAI(prompt) {
-    const failures = [];
+    const apiKey = process.env.GROQ_API_KEY;
 
-    /* ---- Prioritas 1: Google Gemini ---- */
-    if (process.env.GEMINI_API_KEY) {
-        try {
-            const data = await postJson(
-                GEMINI_URL,
-                { "x-goog-api-key": process.env.GEMINI_API_KEY },
-                {
-                    contents: [
-                        { parts: [{ text: prompt }] }
-                    ],
-                    generationConfig: {
-                        maxOutputTokens: MAX_OUTPUT_TOKENS
-                    }
-                }
-            );
-
-            const answer = data.candidates?.[0]?.content?.parts
-                ?.map(part => part.text || "")
-                .join("\n")
-                .trim();
-
-            if (!answer) {
-                throw new Error("Gemini tidak menghasilkan jawaban.");
-            }
-
-            const totalTokens = Number(
-                data.usageMetadata?.totalTokenCount
-            );
-
-            console.log("AI berhasil menggunakan Gemini.");
-
-            return {
-                provider: "gemini",
-                model: GEMINI_MODEL,
-                answer,
-                totalTokens:
-                    Number.isFinite(totalTokens) && totalTokens > 0
-                        ? totalTokens
-                        : estimateTokens(prompt, answer)
-            };
-        } catch (error) {
-            const message =
-                error.name === "TimeoutError"
-                    ? "Gemini timeout."
-                    : error.message || "Tidak dapat menghubungi Gemini.";
-
-            console.error("Gemini gagal. Beralih ke Groq:", message);
-            failures.push(`Gemini: ${message}`);
-        }
-    } else {
-        console.error("GEMINI_API_KEY belum diatur. Langsung memakai Groq.");
-        failures.push("Gemini: GEMINI_API_KEY belum diatur.");
+    if (!apiKey) {
+        const error = new Error("GROQ_API_KEY belum diatur.");
+        error.status = 500;
+        throw error;
     }
 
-    /* ---- Cadangan: Groq ---- */
-    if (process.env.GROQ_API_KEY) {
+    const failures = [];
+
+    for (const model of GROQ_MODELS) {
         try {
-            const data = await postJson(
-                GROQ_URL,
-                { Authorization: `Bearer ${process.env.GROQ_API_KEY}` },
-                {
-                    model: GROQ_MODEL,
+            const response = await fetch(GROQ_URL, {
+                method: "POST",
+                headers: {
+                    Authorization: `Bearer ${apiKey}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify({
+                    model,
                     messages: [
                         {
                             role: "system",
@@ -424,24 +351,43 @@ async function requestAI(prompt) {
                             content: prompt
                         }
                     ],
-                    max_tokens: MAX_OUTPUT_TOKENS,
+                    max_completion_tokens: MAX_OUTPUT_TOKENS,
+                    reasoning_effort: "low",
                     temperature: 0.7
-                }
-            );
+                }),
+                signal: AbortSignal.timeout(AI_TIMEOUT_MS)
+            });
+
+            const raw = await response.text();
+
+            let data = {};
+
+            try {
+                data = raw ? JSON.parse(raw) : {};
+            } catch {
+                throw new Error("Respons tidak valid (bukan JSON).");
+            }
+
+            if (!response.ok) {
+                throw new Error(
+                    data.error?.message ||
+                    `Gagal dengan status ${response.status}.`
+                );
+            }
 
             const answer = data.choices?.[0]?.message?.content?.trim();
 
             if (!answer) {
-                throw new Error("Groq tidak menghasilkan jawaban.");
+                throw new Error("Tidak menghasilkan jawaban.");
             }
 
             const totalTokens = Number(data.usage?.total_tokens);
 
-            console.log("AI berhasil menggunakan Groq sebagai cadangan.");
+            console.log(`AI berhasil menggunakan Groq (${model}).`);
 
             return {
                 provider: "groq",
-                model: GROQ_MODEL,
+                model,
                 answer,
                 totalTokens:
                     Number.isFinite(totalTokens) && totalTokens > 0
@@ -451,18 +397,17 @@ async function requestAI(prompt) {
         } catch (error) {
             const message =
                 error.name === "TimeoutError"
-                    ? "Groq timeout."
+                    ? "Timeout."
                     : error.message || "Tidak dapat menghubungi Groq.";
 
-            console.error("Groq juga gagal:", message);
-            failures.push(`Groq: ${message}`);
+            console.error(`Model ${model} gagal:`, message);
+
+            failures.push(`${model}: ${message}`);
         }
-    } else {
-        failures.push("Groq: GROQ_API_KEY belum diatur.");
     }
 
     const error = new Error(
-        `Semua layanan AI gagal. ${failures.join(" | ")}`
+        `Semua model Groq gagal. ${failures.join(" | ")}`
     );
 
     error.status = 503;
@@ -478,8 +423,9 @@ app.get("/api/health", (req, res) => {
     res.json({
         status: "ok",
         version: "2.1",
-        primaryAI: GEMINI_MODEL,
-        fallbackAI: GROQ_MODEL,
+        provider: "groq",
+        primaryAI: GROQ_MODELS[0],
+        fallbackAI: GROQ_MODELS[1],
         quotaLimit: DAILY_TOKEN_LIMIT_PER_USER,
         redis: isRedisConfigured()
     });
@@ -524,12 +470,9 @@ app.post("/api/tutor", async (req, res) => {
             });
         }
 
-        if (
-            !process.env.GEMINI_API_KEY &&
-            !process.env.GROQ_API_KEY
-        ) {
+        if (!process.env.GROQ_API_KEY) {
             return res.status(500).json({
-                error: "GEMINI_API_KEY dan GROQ_API_KEY belum diatur."
+                error: "GROQ_API_KEY belum diatur."
             });
         }
 
