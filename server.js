@@ -1,39 +1,16 @@
 
-require("dotenv").config();
-
 const express = require("express");
-const path = require("path");
 const crypto = require("crypto");
+const path = require("path");
 
 const app = express();
+
 const PORT = process.env.PORT || 3000;
-
-/* ================================
-   KONFIGURASI UTAMA
-================================ */
-
-const DAILY_TOKEN_LIMIT_PER_USER = 10000;
-const MAX_CODE_CONTEXT_CHARS = 2500;
-const MAX_QUESTION_CHARS = 2000;
-const MAX_OUTPUT_TOKENS = 2048;
-const AI_TIMEOUT_MS = 25000;
-
+const DAILY_TOKEN_LIMIT = 10000;
 const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.8-flash";
 
-const GROQ_MODELS = [
-    "llama-3.3-70b-versatile",
-    "openai/gpt-oss-20b"
-];
-
-const GEMINI_URL =
-    "https://generativelanguage.googleapis.com/v1beta/models/";
-
-const GROQ_URL =
-    "https://api.groq.com/openai/v1/chat/completions";
-
-const PISTON_URL =
-    process.env.PISTON_URL ||
-    "https://emkc.org/api/v2/piston/execute";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
 
 const REDIS_URL =
     process.env.KV_REST_API_URL ||
@@ -43,292 +20,307 @@ const REDIS_TOKEN =
     process.env.KV_REST_API_TOKEN ||
     process.env.UPSTASH_REDIS_REST_TOKEN;
 
-app.use(express.json({ limit: "1mb" }));
+const PISTON_URL = "https://emkc.org/api/v2/piston/execute";
+
+const GROQ_MODELS = [
+    "llama-3.3-70b-versatile",
+    "openai/gpt-oss-20b"
+];
+
+const memoryStore = new Map();
+const rateLimitStore = new Map();
+
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true }));
+
 app.use(express.static(path.join(__dirname, "public")));
 
-/* ================================
-   IDENTITAS PENGGUNA
-================================ */
-
-function getClientIp(req) {
-    const forwarded = req.headers["x-forwarded-for"];
-    let ip = "";
-
-    if (forwarded) {
-        ip = String(forwarded).split(",")[0].trim();
-    }
-
-    if (!ip) {
-        ip = req.socket?.remoteAddress || "unknown";
-    }
-
-    return ip.replace(/^::ffff:/, "");
+if (process.env.TRUST_PROXY === "true") {
+    app.set("trust proxy", 1);
 }
 
-function getDeviceId(req) {
-    const rawDeviceId =
-        req.body?.deviceId ||
-        req.headers["x-device-id"] ||
-        req.query?.deviceId ||
-        "default-device";
-
-    const deviceId = String(rawDeviceId)
-        .trim()
-        .slice(0, 100)
-        .replace(/[^a-zA-Z0-9_-]/g, "");
-
-    return deviceId || "default-device";
-}
-
-function hashIdentity(value) {
-    return crypto
-        .createHash("sha256")
-        .update(String(value))
-        .digest("hex");
-}
-
-/* ================================
-   RESET KUOTA WIB
-================================ */
-
-function getJakartaDateParts(date = new Date()) {
-    const parts = new Intl.DateTimeFormat("en-US", {
+function getJakartaDate() {
+    return new Intl.DateTimeFormat("en-CA", {
         timeZone: "Asia/Jakarta",
         year: "numeric",
         month: "2-digit",
         day: "2-digit"
-    }).formatToParts(date);
-
-    const values = {};
-
-    for (const part of parts) {
-        values[part.type] = part.value;
-    }
-
-    return {
-        year: Number(values.year),
-        month: Number(values.month),
-        day: Number(values.day),
-        text: `${values.year}-${values.month}-${values.day}`
-    };
+    }).format(new Date());
 }
 
-function getTodayKey() {
-    return getJakartaDateParts().text;
-}
-
-function getSecondsUntilJakartaMidnight() {
+function getNextReset() {
     const now = new Date();
-    const { year, month, day } = getJakartaDateParts(now);
 
-    const nextMidnightUtc =
-        Date.UTC(year, month - 1, day + 1) -
-        7 * 60 * 60 * 1000;
+    const jakartaTime = new Date(
+        now.toLocaleString("en-US", {
+            timeZone: "Asia/Jakarta"
+        })
+    );
 
+    jakartaTime.setHours(24, 0, 0, 0);
+
+    const difference = jakartaTime.getTime() -
+        new Date(
+            now.toLocaleString("en-US", {
+                timeZone: "Asia/Jakarta"
+            })
+        ).getTime();
+
+    return new Date(Date.now() + difference);
+}
+
+function getSecondsUntilReset() {
     return Math.max(
-        1,
-        Math.ceil((nextMidnightUtc - now.getTime()) / 1000)
+        60,
+        Math.ceil((getNextReset().getTime() - Date.now()) / 1000)
     );
 }
 
-function getUsageKey(req) {
-    const date = getTodayKey();
-    const ip = hashIdentity(getClientIp(req));
-    const deviceId = hashIdentity(getDeviceId(req));
-
-    return `quota:${date}:${ip}:${deviceId}`;
+function getClientIp(req) {
+    return req.ip || req.socket.remoteAddress || "unknown";
 }
 
-/* ================================
-   PENYIMPANAN KUOTA REDIS
-================================ */
+function getDeviceId(req) {
+    return (
+        req.body?.deviceId ||
+        req.headers["x-device-id"] ||
+        req.query?.deviceId ||
+        "default-device"
+    );
+}
 
-const memoryStore = new Map();
+function getUserId(req) {
+    const identity = `${getClientIp(req)}:${getDeviceId(req)}`;
 
-function memoryGet(key) {
-    const item = memoryStore.get(key);
+    return crypto
+        .createHash("sha256")
+        .update(identity)
+        .digest("hex");
+}
 
-    if (!item) return 0;
+function getQuotaKey(userId) {
+    return `codelearn:quota:${getJakartaDate()}:${userId}`;
+}
 
-    if (item.expiresAt <= Date.now()) {
-        memoryStore.delete(key);
-        return 0;
+async function redisCommand(command, ...args) {
+    if (!REDIS_URL || !REDIS_TOKEN) {
+        throw new Error("Redis belum dikonfigurasi");
     }
 
-    return item.value;
-}
-
-function memoryIncrBy(key, amount) {
-    const value = memoryGet(key) + amount;
-
-    memoryStore.set(key, {
-        value,
-        expiresAt:
-            Date.now() + getSecondsUntilJakartaMidnight() * 1000
-    });
-
-    return value;
-}
-
-function isRedisConfigured() {
-    return Boolean(REDIS_URL && REDIS_TOKEN);
-}
-
-async function redisPipeline(commands) {
     const response = await fetch(
-        `${REDIS_URL.replace(/\/+$/, "")}/pipeline`,
+        `${REDIS_URL.replace(/\/$/, "")}/${[
+            command,
+            ...args
+        ].map(value => encodeURIComponent(value)).join("/")}`,
         {
-            method: "POST",
+            method: "GET",
             headers: {
-                Authorization: `Bearer ${REDIS_TOKEN}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(commands)
+                Authorization: `Bearer ${REDIS_TOKEN}`
+            }
         }
     );
 
     if (!response.ok) {
-        throw new Error(`Redis gagal dengan status ${response.status}`);
+        throw new Error(`Redis error: ${response.status}`);
     }
 
-    const results = await response.json();
+    const result = await response.json();
 
-    return results.map(item => {
-        if (item.error) throw new Error(item.error);
-        return item.result;
-    });
+    if (result.error) {
+        throw new Error(result.error);
+    }
+
+    return result.result;
 }
 
-async function getUsedTokens(key) {
-    if (!isRedisConfigured()) {
-        return memoryGet(key);
+async function getUsedTokens(userId) {
+    const key = getQuotaKey(userId);
+
+    if (REDIS_URL && REDIS_TOKEN) {
+        try {
+            const result = await redisCommand("GET", key);
+            return Number(result || 0);
+        } catch (error) {
+            console.error("Redis GET gagal:", error.message);
+        }
     }
 
-    try {
-        const [value] = await redisPipeline([["GET", key]]);
-        return Number(value) || 0;
-    } catch (error) {
-        console.error("Redis GET gagal:", error.message);
-        return memoryGet(key);
-    }
+    return memoryStore.get(key) || 0;
 }
 
-async function addUsedTokens(key, tokens) {
-    const amount = Math.max(0, Math.ceil(Number(tokens) || 0));
+async function addUsedTokens(userId, amount) {
+    const key = getQuotaKey(userId);
+    const tokens = Math.max(0, Math.ceil(Number(amount) || 0));
 
-    if (!amount) return getUsedTokens(key);
-
-    if (!isRedisConfigured()) {
-        return memoryIncrBy(key, amount);
+    if (tokens === 0) {
+        return getUsedTokens(userId);
     }
 
-    try {
-        const ttl = getSecondsUntilJakartaMidnight();
+    if (REDIS_URL && REDIS_TOKEN) {
+        try {
+            const result = await redisCommand("INCRBY", key, tokens);
 
-        const [total] = await redisPipeline([
-            ["INCRBY", key, String(amount)],
-            ["EXPIRE", key, String(ttl)]
-        ]);
+            await redisCommand(
+                "EXPIRE",
+                key,
+                getSecondsUntilReset()
+            );
 
-        return Number(total) || 0;
-    } catch (error) {
-        console.error("Redis INCRBY gagal:", error.message);
-        return memoryIncrBy(key, amount);
+            return Number(result);
+        } catch (error) {
+            console.error("Redis INCRBY gagal:", error.message);
+        }
     }
+
+    const current = memoryStore.get(key) || 0;
+    const updated = current + tokens;
+
+    memoryStore.set(key, updated);
+
+    return updated;
 }
 
-function buildQuota(usedTokens) {
-    const used = Math.max(0, Number(usedTokens) || 0);
+function estimateTokens(text) {
+    if (!text) return 0;
 
+    return Math.ceil(String(text).length / 4);
+}
+
+function getQuotaInfo(usedTokens) {
     return {
-        usedTokens: used,
-        limitTokens: DAILY_TOKEN_LIMIT_PER_USER,
+        usedTokens,
+        limit: DAILY_TOKEN_LIMIT,
         remainingTokens: Math.max(
             0,
-            DAILY_TOKEN_LIMIT_PER_USER - used
-        )
+            DAILY_TOKEN_LIMIT - usedTokens
+        ),
+        resetAt: getNextReset().toISOString(),
+        timezone: "Asia/Jakarta"
     };
 }
 
-/* ================================
-   PROMPT AI
-================================ */
+function normalizeMessages(body) {
+    const messages = [];
 
-function buildPrompt({ question, language, topic, code }) {
-    const cleanQuestion = String(question)
-        .trim()
-        .slice(0, MAX_QUESTION_CHARS);
+    if (body.systemPrompt || body.system) {
+        messages.push({
+            role: "system",
+            content: String(body.systemPrompt || body.system)
+        });
+    } else {
+        messages.push({
+            role: "system",
+            content:
+                "Kamu adalah CodeLearn, asisten pembelajaran coding untuk siswa pemula. " +
+                "Jawab dalam bahasa Indonesia yang mudah dipahami. " +
+                "Berikan contoh kode yang benar dan penjelasan secara bertahap."
+        });
+    }
 
-    const cleanCode = String(code || "")
-        .slice(0, MAX_CODE_CONTEXT_CHARS);
+    if (Array.isArray(body.messages)) {
+        for (const message of body.messages) {
+            if (
+                message &&
+                ["user", "assistant"].includes(message.role) &&
+                typeof message.content === "string"
+            ) {
+                messages.push({
+                    role: message.role,
+                    content: message.content
+                });
+            }
+        }
+    } else if (Array.isArray(body.history)) {
+        for (const message of body.history) {
+            if (
+                message &&
+                ["user", "assistant"].includes(message.role) &&
+                typeof (message.content || message.text) === "string"
+            ) {
+                messages.push({
+                    role: message.role,
+                    content: String(message.content || message.text)
+                });
+            }
+        }
+    }
 
-    return `
-Bahasa pemrograman: ${String(language || "Tidak diketahui").slice(0, 40)}
-Materi: ${String(topic || "Tidak diketahui").slice(0, 80)}
+    const prompt =
+        body.prompt ||
+        body.question ||
+        body.message;
 
-Kode yang sedang dipelajari:
-${cleanCode || "(Tidak ada kode)"}
+    if (typeof prompt === "string" && prompt.trim()) {
+        messages.push({
+            role: "user",
+            content: prompt.trim()
+        });
+    }
 
-Pertanyaan siswa:
-${cleanQuestion}
-
-Panduan:
-- Jawab dengan bahasa Indonesia yang mudah dipahami dan ringkas.
-- Jelaskan konsep secara bertahap.
-- Berikan contoh kode singkat jika diperlukan.
-- Jika ada kesalahan kode, jelaskan penyebab dan perbaikannya.
-- Gunakan format Markdown.
-- Utamakan penjelasan yang mudah dipahami pemula.
-`.trim();
+    return messages;
 }
 
-function estimateTokens(prompt, answer) {
-    return Math.ceil((prompt.length + answer.length) / 3);
+function getPromptText(messages) {
+    return messages
+        .map(message => message.content)
+        .join("\n");
 }
 
-/* ================================
-   GEMINI AI
-================================ */
+async function requestGeminiAI(messages, maxOutputTokens) {
+    if (!GEMINI_API_KEY) {
+        throw new Error("GEMINI_API_KEY belum diatur");
+    }
 
-async function requestGeminiAI(prompt) {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const systemMessage = messages.find(
+        message => message.role === "system"
+    );
 
-    if (!apiKey) {
-        throw new Error("GEMINI_API_KEY belum diatur.");
+    const conversation = messages
+        .filter(message => message.role !== "system")
+        .map(message => ({
+            role: message.role === "assistant" ? "model" : "user",
+            parts: [{ text: message.content }]
+        }));
+
+    if (conversation.length === 0) {
+        throw new Error("Pesan untuk Gemini kosong");
     }
 
     const response = await fetch(
-        `${GEMINI_URL}${GEMINI_MODEL}:generateContent?key=${apiKey}`,
+        `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
         {
             method: "POST",
             headers: {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                systemInstruction: {
-                    parts: [{
-                        text: "Kamu adalah CodeLearn AI Tutor. Jawab menggunakan bahasa Indonesia yang mudah dipahami pemula. Jelaskan secara bertahap dan gunakan Markdown."
-                    }]
-                },
-                contents: [{
-                    role: "user",
-                    parts: [{ text: prompt }]
-                }],
+                systemInstruction: systemMessage
+                    ? {
+                        parts: [{ text: systemMessage.content }]
+                    }
+                    : undefined,
+                contents: conversation,
                 generationConfig: {
                     temperature: 0.7,
-                    maxOutputTokens: MAX_OUTPUT_TOKENS
+                    maxOutputTokens
                 }
-            }),
-            signal: AbortSignal.timeout(AI_TIMEOUT_MS)
+            })
         }
     );
 
-    if (!response.ok) {
-        const errorText = await response.text();
-        throw new Error(`Gemini HTTP ${response.status}: ${errorText}`);
-    }
-
     const data = await response.json();
+
+    if (!response.ok) {
+        const message =
+            data.error?.message ||
+            `Gemini HTTP ${response.status}`;
+
+        const error = new Error(message);
+        error.status = response.status;
+        error.provider = "Gemini";
+
+        throw error;
+    }
 
     const answer = data.candidates?.[0]?.content?.parts
         ?.map(part => part.text || "")
@@ -336,146 +328,144 @@ async function requestGeminiAI(prompt) {
         .trim();
 
     if (!answer) {
-        throw new Error("Gemini tidak memberikan jawaban.");
+        throw new Error("Gemini tidak memberikan jawaban");
     }
-
-    const tokensUsed =
-        Number(data.usageMetadata?.totalTokenCount) ||
-        estimateTokens(prompt, answer);
 
     return {
         answer,
-        provider: `gemini/${GEMINI_MODEL}`,
-        tokensUsed
+        provider: "Gemini",
+        model: GEMINI_MODEL,
+        usedTokens:
+            data.usageMetadata?.totalTokenCount ||
+            estimateTokens(answer)
     };
 }
 
-/* ================================
-   GROQ AI CADANGAN
-================================ */
-
-async function requestGroqAI(prompt) {
-    const groqKey = process.env.GROQ_API_KEY;
-
-    if (!groqKey) {
-        throw new Error("GROQ_API_KEY belum diatur.");
+async function requestGroqModel(messages, model, maxOutputTokens) {
+    if (!GROQ_API_KEY) {
+        throw new Error("GROQ_API_KEY belum diatur");
     }
 
-    const failures = [];
+    const isGptOss = model.includes("gpt-oss");
+
+    const body = {
+        model,
+        messages,
+        temperature: 0.7,
+        [isGptOss ? "max_completion_tokens" : "max_tokens"]:
+            maxOutputTokens
+    };
+
+    if (isGptOss) {
+        body.reasoning_effort = "low";
+    }
+
+    const response = await fetch(
+        "https://api.groq.com/openai/v1/chat/completions",
+        {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${GROQ_API_KEY}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(body)
+        }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        const message =
+            data.error?.message ||
+            `Groq HTTP ${response.status}`;
+
+        const error = new Error(message);
+        error.status = response.status;
+        error.provider = "Groq";
+        error.model = model;
+
+        throw error;
+    }
+
+    const answer = data.choices?.[0]?.message?.content;
+
+    if (!answer || typeof answer !== "string") {
+        throw new Error(`Model ${model} tidak memberikan jawaban`);
+    }
+
+    return {
+        answer: answer.trim(),
+        provider: "Groq",
+        model,
+        usedTokens:
+            data.usage?.total_tokens ||
+            estimateTokens(answer)
+    };
+}
+
+async function requestGroqAI(messages, maxOutputTokens) {
+    let lastError;
 
     for (const model of GROQ_MODELS) {
         try {
-            const body = {
+            console.log(`Mencoba Groq model: ${model}`);
+
+            const result = await requestGroqModel(
+                messages,
                 model,
-                messages: [
-                    {
-                        role: "system",
-                        content: "Kamu adalah CodeLearn AI Tutor. Jawab menggunakan bahasa Indonesia yang mudah dipahami pemula. Jelaskan secara bertahap dan gunakan Markdown."
-                    },
-                    {
-                        role: "user",
-                        content: prompt
-                    }
-                ],
-                max_completion_tokens: MAX_OUTPUT_TOKENS,
-                temperature: 0.7
-            };
+                maxOutputTokens
+            );
 
-            if (model.startsWith("openai/gpt-oss")) {
-                body.reasoning_effort = "low";
-            }
+            console.log(`Groq berhasil: ${model}`);
 
-            const response = await fetch(GROQ_URL, {
-                method: "POST",
-                headers: {
-                    Authorization: `Bearer ${groqKey}`,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify(body),
-                signal: AbortSignal.timeout(AI_TIMEOUT_MS)
-            });
-
-            if (!response.ok) {
-                const errorText = await response.text();
-
-                failures.push(`${model}: HTTP ${response.status}`);
-
-                console.warn(
-                    `Groq (${model}) gagal:`,
-                    errorText
-                );
-
-                continue;
-            }
-
-            const data = await response.json();
-
-            const answer =
-                data.choices?.[0]?.message?.content?.trim();
-
-            if (!answer) {
-                failures.push(`${model}: Jawaban kosong`);
-                continue;
-            }
-
-            return {
-                answer,
-                provider: `groq/${model}`,
-                tokensUsed:
-                    Number(data.usage?.total_tokens) ||
-                    estimateTokens(prompt, answer)
-            };
-
+            return result;
         } catch (error) {
-            failures.push(`${model}: ${error.message}`);
+            lastError = error;
 
-            console.warn(
-                `Error Groq (${model}):`,
+            console.error(
+                `Groq ${model} gagal:`,
                 error.message
             );
         }
     }
 
-    throw new Error(
-        `Semua model Groq gagal: ${failures.join(" | ")}`
-    );
+    throw lastError || new Error("Semua model Groq gagal");
 }
 
-/* ================================
-   SISTEM GEMINI + GROQ FALLBACK
-================================ */
-
-async function requestHybridAI(prompt) {
+async function requestHybridAI(messages, maxOutputTokens) {
     try {
-        console.log("Mencoba AI utama: Gemini");
+        console.log(`Mencoba AI utama: Gemini (${GEMINI_MODEL})`);
 
-        const result = await requestGeminiAI(prompt);
+        const result = await requestGeminiAI(
+            messages,
+            maxOutputTokens
+        );
 
-        console.log("Gemini berhasil memberikan jawaban.");
+        console.log("Gemini berhasil memberikan jawaban");
 
         return result;
-
     } catch (geminiError) {
-        console.warn(
-            "Gemini gagal, beralih ke Groq:",
+        console.error(
+            "Gemini gagal. Beralih otomatis ke Groq:",
             geminiError.message
         );
     }
 
     try {
-        console.log("Mencoba AI cadangan: Groq");
+        console.log("Menggunakan AI cadangan: Groq");
 
-        const result = await requestGroqAI(prompt);
-
-        console.log("Groq berhasil memberikan jawaban.");
-
-        return result;
-
+        return await requestGroqAI(
+            messages,
+            maxOutputTokens
+        );
     } catch (groqError) {
-        console.error("Gemini dan Groq gagal.");
+        console.error(
+            "Semua AI gagal:",
+            groqError.message
+        );
 
         const error = new Error(
-            `Gemini dan Groq tidak dapat memberikan jawaban. Groq: ${groqError.message}`
+            `Gemini dan Groq tidak dapat digunakan. Groq: ${groqError.message}`
         );
 
         error.status = 503;
@@ -484,180 +474,175 @@ async function requestHybridAI(prompt) {
     }
 }
 
-/* ================================
-   BATAS EKSEKUSI KODE
-================================ */
-
-const runRequests = new Map();
-
-function checkRunLimit(ip) {
+function checkRateLimit(req, res, next) {
+    const ip = getClientIp(req);
     const now = Date.now();
     const windowMs = 60 * 1000;
     const maxRequests = 20;
 
-    let data = runRequests.get(ip);
+    const current = rateLimitStore.get(ip);
 
-    if (!data || now - data.start >= windowMs) {
-        data = {
-            start: now,
-            count: 0
-        };
+    if (!current || now > current.resetAt) {
+        rateLimitStore.set(ip, {
+            count: 1,
+            resetAt: now + windowMs
+        });
+
+        return next();
     }
 
-    data.count++;
+    if (current.count >= maxRequests) {
+        return res.status(429).json({
+            success: false,
+            error: "Terlalu banyak permintaan. Coba lagi dalam satu menit."
+        });
+    }
 
-    runRequests.set(ip, data);
+    current.count += 1;
 
-    return data.count <= maxRequests;
+    next();
 }
-
-/* ================================
-   API HEALTH
-================================ */
 
 app.get("/api/health", (req, res) => {
     res.json({
-        status: "ok",
-        version: "2.4-gemini-groq",
-        primaryAI: `gemini/${GEMINI_MODEL}`,
-        fallbackAI: GROQ_MODELS,
-        geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
-        groqConfigured: Boolean(process.env.GROQ_API_KEY),
-        redisConfigured: isRedisConfigured()
+        success: true,
+        status: "online",
+        service: "CodeLearn API",
+        ai: {
+            primary: GEMINI_MODEL,
+            fallback: GROQ_MODELS
+        },
+        redis: Boolean(REDIS_URL && REDIS_TOKEN),
+        time: new Date().toISOString()
     });
 });
 
-/* ================================
-   API QUOTA
-================================ */
-
 app.get("/api/quota", async (req, res) => {
     try {
-        const usageKey = getUsageKey(req);
-        const used = await getUsedTokens(usageKey);
+        const userId = getUserId(req);
+        const usedTokens = await getUsedTokens(userId);
 
-        return res.json(buildQuota(used));
-
+        res.json({
+            success: true,
+            quota: getQuotaInfo(usedTokens)
+        });
     } catch (error) {
-        console.error("Error /api/quota:", error);
+        console.error("Quota error:", error.message);
 
-        return res.status(500).json({
-            error: "Gagal mengambil data kuota."
+        res.status(500).json({
+            success: false,
+            error: "Gagal mengambil informasi kuota"
         });
     }
 });
-
-/* ================================
-   API TUTOR
-================================ */
 
 app.post("/api/tutor", async (req, res) => {
     try {
-        const {
-            question,
-            language,
-            topic,
-            code
-        } = req.body || {};
+        const userId = getUserId(req);
+        const usedTokens = await getUsedTokens(userId);
 
-        if (
-            !question ||
-            typeof question !== "string" ||
-            !question.trim()
-        ) {
+        const messages = normalizeMessages(req.body);
+        const promptText = getPromptText(messages);
+
+        if (!promptText.trim()) {
             return res.status(400).json({
-                error: "Pertanyaan tidak boleh kosong."
+                success: false,
+                error: "Pertanyaan tidak boleh kosong"
             });
         }
 
-        const usageKey = getUsageKey(req);
-        const currentUsed = await getUsedTokens(usageKey);
+        const inputTokens = estimateTokens(promptText);
+        const remainingTokens = DAILY_TOKEN_LIMIT - usedTokens;
 
-        if (currentUsed >= DAILY_TOKEN_LIMIT_PER_USER) {
+        if (remainingTokens <= 0) {
             return res.status(429).json({
-                error: "Kuota AI harian Anda (10.000 token) sudah habis. Silakan kembali besok pukul 00.00 WIB!",
-                ...buildQuota(currentUsed)
+                success: false,
+                error: "Kuota harian 10.000 token sudah habis.",
+                quota: getQuotaInfo(usedTokens)
             });
         }
 
-        const prompt = buildPrompt({
-            question,
-            language,
-            topic,
-            code
-        });
+        if (inputTokens >= remainingTokens) {
+            return res.status(429).json({
+                success: false,
+                error: "Sisa kuota tidak cukup untuk mengirim pertanyaan ini.",
+                quota: getQuotaInfo(usedTokens)
+            });
+        }
 
-        const aiResult = await requestHybridAI(prompt);
-
-        const totalUsedNow = await addUsedTokens(
-            usageKey,
-            aiResult.tokensUsed
+        const maxOutputTokens = Math.max(
+            1,
+            Math.min(2048, remainingTokens - inputTokens)
         );
 
-        return res.json({
-            answer: aiResult.answer,
-            provider: aiResult.provider,
-            ...buildQuota(totalUsedNow)
+        const result = await requestHybridAI(
+            messages,
+            maxOutputTokens
+        );
+
+        const actualTokens = Math.max(
+            inputTokens + estimateTokens(result.answer),
+            Number(result.usedTokens) || 0
+        );
+
+        const newUsedTokens = await addUsedTokens(
+            userId,
+            actualTokens
+        );
+
+        res.json({
+            success: true,
+            answer: result.answer,
+            provider: result.provider,
+            model: result.model,
+            usedTokens: actualTokens,
+            quota: getQuotaInfo(newUsedTokens)
         });
-
     } catch (error) {
-        console.error("Error /api/tutor:", error);
+        console.error("Tutor API error:", error.message);
 
-        return res.status(error.status || 503).json({
-            error:
-                error.message ||
-                "Terjadi kesalahan saat memproses pertanyaan AI."
+        res.status(error.status || 500).json({
+            success: false,
+            error: error.message || "Terjadi kesalahan pada AI"
         });
     }
 });
 
-/* ================================
-   API RUNNER JAVA & C++
-================================ */
-
-app.post("/api/run", async (req, res) => {
+app.post("/api/run", checkRateLimit, async (req, res) => {
     try {
-        const { language, code, stdin } = req.body || {};
+        const { language, code, input = "" } = req.body;
 
-        const ip = getClientIp(req);
-
-        if (!checkRunLimit(ip)) {
-            return res.status(429).json({
-                error: "Terlalu banyak menjalankan kode. Coba lagi dalam satu menit."
-            });
-        }
-
-        if (!code || typeof code !== "string") {
+        if (!language || !code || typeof code !== "string") {
             return res.status(400).json({
-                error: "Kode tidak boleh kosong."
+                success: false,
+                error: "Bahasa dan kode harus diisi"
             });
         }
 
-        if (code.length > 20000) {
-            return res.status(400).json({
-                error: "Ukuran kode terlalu besar. Maksimal 20.000 karakter."
-            });
-        }
-
-        const runtimeMap = {
+        const languages = {
             java: {
                 language: "java",
                 version: "15.0.2",
                 filename: "Main.java"
             },
             cpp: {
-                language: "c++",
+                language: "cpp",
+                version: "10.2.0",
+                filename: "main.cpp"
+            },
+            "c++": {
+                language: "cpp",
                 version: "10.2.0",
                 filename: "main.cpp"
             }
         };
 
-        const target =
-            runtimeMap[String(language || "").toLowerCase()];
+        const selected = languages[language.toLowerCase()];
 
-        if (!target) {
+        if (!selected) {
             return res.status(400).json({
-                error: "Bahasa tidak didukung oleh server runner."
+                success: false,
+                error: "Bahasa yang didukung hanya Java dan C++"
             });
         }
 
@@ -667,59 +652,65 @@ app.post("/api/run", async (req, res) => {
                 "Content-Type": "application/json"
             },
             body: JSON.stringify({
-                language: target.language,
-                version: target.version,
-                files: [{
-                    name: target.filename,
-                    content: code
-                }],
-                stdin: String(stdin || "").slice(0, 2000)
-            }),
-            signal: AbortSignal.timeout(30000)
+                language: selected.language,
+                version: selected.version,
+                files: [
+                    {
+                        name: selected.filename,
+                        content: code
+                    }
+                ],
+                stdin: String(input)
+            })
         });
-
-        if (!response.ok) {
-            const errorText = await response.text();
-
-            throw new Error(
-                `Piston HTTP ${response.status}: ${errorText}`
-            );
-        }
 
         const data = await response.json();
 
-        const output =
-            data.run?.output ||
-            data.compile?.output ||
-            "(Tidak ada output)";
+        if (!response.ok) {
+            return res.status(response.status).json({
+                success: false,
+                error:
+                    data.message ||
+                    data.error ||
+                    "Gagal menjalankan kode"
+            });
+        }
 
-        return res.json({
-            output,
-            stdout: data.run?.stdout || "",
+        res.json({
+            success: true,
+            output: data.run?.stdout || "",
             stderr: data.run?.stderr || "",
+            error: data.run?.code !== 0
+                ? data.run?.stderr || data.compile?.stderr || "Program selesai dengan error"
+                : null,
             exitCode: data.run?.code ?? null,
-            signal: data.run?.signal || null
+            compile: data.compile || null
         });
-
     } catch (error) {
-        console.error("Error /api/run:", error);
+        console.error("Code runner error:", error.message);
 
-        return res.status(500).json({
-            error: "Gagal menjalankan kode: " + error.message
+        res.status(500).json({
+            success: false,
+            error: error.message || "Gagal menjalankan kode"
         });
     }
 });
 
-/* ================================
-   START SERVER
-================================ */
-
-if (require.main === module) {
-    app.listen(PORT, () => {
-        console.log(
-            `Server CodeLearn v2.4 Gemini + Groq berjalan di http://localhost:${PORT}`
-        );
+app.use((req, res) => {
+    res.status(404).json({
+        success: false,
+        error: "Endpoint tidak ditemukan"
     });
-}
+});
+
+app.listen(PORT, () => {
+    console.log("--------------------------------");
+    console.log("CodeLearn Server berjalan");
+    console.log(`Port: ${PORT}`);
+    console.log(`Gemini utama: ${GEMINI_MODEL}`);
+    console.log(`Groq cadangan: ${GROQ_MODELS.join(", ")}`);
+    console.log(`Redis: ${REDIS_URL ? "Aktif" : "Memory fallback"}`);
+    console.log("--------------------------------");
+});
 
 module.exports = app;
